@@ -1,5 +1,6 @@
 """
 AI Библиотекарь - FastAPI сервер для чат-бота
+Расширенная версия с поиском книг
 """
 
 import os
@@ -50,11 +51,43 @@ class Question(BaseModel):
 class Answer(BaseModel):
     response: str
 
-# === Поиск в базе знаний ===
+# === Поиск в базе знаний (расширенный) ===
 def search_in_knowledge_base(query: str) -> Optional[str]:
-    """Простой поиск по ключевым словам в базе знаний."""
+    """Поиск по ключевым словам в базе знаний, включая учебники."""
     query_lower = query.lower()
     
+    # Проверяем, спрашивают ли про книгу/учебник
+    book_keywords = ["учебник", "книга", "атлас", "литература", "автор", "найти", "поиск", "есть ли"]
+    is_book_query = any(kw in query_lower for kw in book_keywords)
+    
+    # Если это запрос о книге, ищем в разделе учебников
+    if is_book_query:
+        # Ищем конкретного автора или название
+        lines = KNOWLEDGE_BASE.split('\n')
+        books_section = False
+        found_books = []
+        
+        for line in lines:
+            if "=== ПОПУЛЯРНЫЕ УЧЕБНИКИ" in line:
+                books_section = True
+                continue
+            elif books_section:
+                if line.startswith("==="):
+                    break
+                if line.strip() and not line.startswith("--"):
+                    # Проверяем, содержит ли строка ключевые слова из запроса
+                    line_lower = line.lower()
+                    # Извлекаем ключевые слова из запроса (игнорируем стоп-слова)
+                    stop_words = ["учебник", "книга", "атлас", "есть", "ли", "в", "по", "для", "автор", "найти"]
+                    search_terms = [w for w in query_lower.split() if w not in stop_words]
+                    
+                    if any(term in line_lower for term in search_terms):
+                        found_books.append(line.strip())
+        
+        if found_books:
+            return "Найдены следующие учебники:\n" + "\n".join(found_books[:5])
+    
+    # Расширенная карта ключевых слов для общих вопросов
     keywords_map = {
         "режим работы": "=== РЕЖИМ РАБОТЫ ===",
         "часы работы": "=== РЕЖИМ РАБОТЫ ===",
@@ -118,12 +151,12 @@ async def generate_ai_response(query: str, context: Optional[str] = None) -> str
 Вопрос: {query}
 
 Ответь кратко, дружелюбно и по делу. Не придумывай информацию, которой нет в контексте.
-Если в контексте нет точного ответа, предложи обратиться к сотруднику библиотеки.
+Если речь о книгах — перечисли найденные учебники с авторами.
 """
     else:
         prompt = f"""
 Ты — вежливый библиотекарь. На вопрос: "{query}" у тебя нет точной информации.
-Ответь дружелюбно, что лучше уточнить у сотрудника библиотеки лично или по телефону +7(499) 246-05-97.
+Ответь дружелюбно, что для поиска книг лучше воспользоваться личным кабинетом на сайте http://edu.rucml.ru/ или обратиться к сотруднику библиотеки по телефону +7(499) 246-05-97.
 """
     
     try:
@@ -131,7 +164,7 @@ async def generate_ai_response(query: str, context: Optional[str] = None) -> str
             model=MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
-            max_tokens=300
+            max_tokens=400
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
@@ -150,7 +183,7 @@ async def chat(question: Question):
         ai_response = await generate_ai_response(user_message, kb_result)
         return Answer(response=ai_response)
     else:
-        # 3. Если не нашли — вежливо отправляем к человеку
+        # 3. Если не нашли — вежливо отправляем к человеку или в личный кабинет
         ai_response = await generate_ai_response(user_message)
         return Answer(response=ai_response)
 
