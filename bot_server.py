@@ -1,16 +1,17 @@
 """
 AI Библиотекарь - FastAPI сервер для чат-бота
-Расширенная версия с поиском книг
+Версия на requests (без openai)
 """
 
 import os
 import re
+import json
+import requests
 from typing import Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-import requests
 
 load_dotenv()
 
@@ -19,14 +20,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not OPENROUTER_API_KEY:
     raise ValueError("OPENROUTER_API_KEY не найден!")
 
-client = AsyncOpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
-    default_headers={
-        "HTTP-Referer": "https://t.me/p01sK0vikbot",
-        "X-Title": "LibraryBot"
-    }
-)
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_NAME = "google/gemini-2.0-flash-exp:free"
 
 # === Загрузка базы знаний ===
@@ -44,14 +38,44 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class Question(BaseModel):
     message: str
     history: Optional[list] = []
 
+
 class Answer(BaseModel):
     response: str
 
-# === Поиск в базе знаний (расширенный) ===
+
+# === Вызов OpenRouter через requests ===
+def call_openrouter(prompt: str, max_tokens: int = 400) -> str:
+    """Отправляет запрос к OpenRouter API и возвращает ответ."""
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/Anym0ree/Sechenov",
+        "X-Title": "LibraryBot"
+    }
+    
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "max_tokens": max_tokens
+    }
+    
+    try:
+        response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"Ошибка OpenRouter: {e}")
+        return "Извините, произошла ошибка. Пожалуйста, позвоните в библиотеку: +7(499) 246-05-97"
+
+
+# === Поиск в базе знаний ===
 def search_in_knowledge_base(query: str) -> Optional[str]:
     """Поиск по ключевым словам в базе знаний, включая учебники."""
     query_lower = query.lower()
@@ -62,7 +86,6 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
     
     # Если это запрос о книге, ищем в разделе учебников
     if is_book_query:
-        # Ищем конкретного автора или название
         lines = KNOWLEDGE_BASE.split('\n')
         books_section = False
         found_books = []
@@ -75,9 +98,7 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
                 if line.startswith("==="):
                     break
                 if line.strip() and not line.startswith("--"):
-                    # Проверяем, содержит ли строка ключевые слова из запроса
                     line_lower = line.lower()
-                    # Извлекаем ключевые слова из запроса (игнорируем стоп-слова)
                     stop_words = ["учебник", "книга", "атлас", "есть", "ли", "в", "по", "для", "автор", "найти"]
                     search_terms = [w for w in query_lower.split() if w not in stop_words]
                     
@@ -87,7 +108,7 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
         if found_books:
             return "Найдены следующие учебники:\n" + "\n".join(found_books[:5])
     
-    # Расширенная карта ключевых слов для общих вопросов
+    # Карта ключевых слов для общих вопросов
     keywords_map = {
         "режим работы": "=== РЕЖИМ РАБОТЫ ===",
         "часы работы": "=== РЕЖИМ РАБОТЫ ===",
@@ -139,8 +160,9 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
     
     return None
 
+
 # === Генерация ответа через ИИ ===
-async def generate_ai_response(query: str, context: Optional[str] = None) -> str:
+def generate_ai_response(query: str, context: Optional[str] = None) -> str:
     if context:
         prompt = f"""
 Ты — вежливый и полезный библиотекарь Фундаментальной учебной библиотеки Сеченовского университета.
@@ -159,16 +181,8 @@ async def generate_ai_response(query: str, context: Optional[str] = None) -> str
 Ответь дружелюбно, что для поиска книг лучше воспользоваться личным кабинетом на сайте http://edu.rucml.ru/ или обратиться к сотруднику библиотеки по телефону +7(499) 246-05-97.
 """
     
-    try:
-        response = await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=400
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Извините, произошла ошибка. Пожалуйста, позвоните в библиотеку: +7(499) 246-05-97"
+    return call_openrouter(prompt, max_tokens=400)
+
 
 # === Главный эндпоинт ===
 @app.post("/chat", response_model=Answer)
@@ -180,16 +194,18 @@ async def chat(question: Question):
     
     if kb_result:
         # 2. Если нашли — просим ИИ красиво оформить
-        ai_response = await generate_ai_response(user_message, kb_result)
+        ai_response = generate_ai_response(user_message, kb_result)
         return Answer(response=ai_response)
     else:
-        # 3. Если не нашли — вежливо отправляем к человеку или в личный кабинет
-        ai_response = await generate_ai_response(user_message)
+        # 3. Если не нашли — вежливо отправляем к человеку
+        ai_response = generate_ai_response(user_message)
         return Answer(response=ai_response)
+
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
 
 if __name__ == "__main__":
     import uvicorn
