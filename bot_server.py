@@ -1,23 +1,23 @@
 """
 AI Библиотекарь - FastAPI сервер для чат-бота
-Версия с прямым вызовом Google Gemini API (без Pydantic и dotenv)
+Версия с прямым вызовом Groq API (быстро, бесплатно, без танцев с бубном)
 """
 
 import os
 import json
+import requests
 from typing import Optional
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-import google.generativeai as genai
 
-# === Настройка Gemini ===
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise ValueError("❌ GEMINI_API_KEY не найден в переменных окружения!")
+# === Настройка Groq ===
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise ValueError("❌ GROQ_API_KEY не найден в переменных окружения!")
 
-genai.configure(api_key=GEMINI_API_KEY)
-MODEL_NAME = "gemini-2.5-flash"
-model = genai.GenerativeModel(MODEL_NAME)
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+# Бесплатная и очень быстрая модель. Можно заменить на "llama-3.3-70b-versatile" или "mixtral-8x7b-32768"
+MODEL_NAME = "llama-3.3-70b-versatile"
 
 # === Загрузка базы знаний ===
 with open("knowledge_base.txt", "r", encoding="utf-8") as f:
@@ -42,28 +42,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# === Вызов Google Gemini API ===
-def generate_with_gemini(prompt: str, max_tokens: int = 400) -> str:
+# === Вызов Groq API ===
+def generate_with_groq(prompt: str, max_tokens: int = 400) -> str:
+    """Отправляет запрос к Groq API и возвращает ответ."""
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "max_tokens": max_tokens
+    }
+    
     try:
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(
-                max_output_tokens=max_tokens,
-                temperature=0.3
-            )
-        )
-        return response.text.strip()
+        response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        print(f"Ошибка Gemini: {e}")
+        print(f"Ошибка Groq: {e}")
         return "Извините, произошла ошибка. Пожалуйста, позвоните в библиотеку: +7(499) 246-05-97"
 
 # === Поиск в базе знаний ===
 def search_in_knowledge_base(query: str) -> Optional[str]:
+    """Поиск по ключевым словам в базе знаний, включая учебники."""
     query_lower = query.lower()
     
+    # Проверяем, спрашивают ли про книгу/учебник
     book_keywords = ["учебник", "книга", "атлас", "литература", "автор", "найти", "поиск", "есть ли"]
     is_book_query = any(kw in query_lower for kw in book_keywords)
     
+    # Если это запрос о книге, ищем в разделе учебников
     if is_book_query:
         lines = KNOWLEDGE_BASE.split('\n')
         books_section = False
@@ -87,6 +98,7 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
         if found_books:
             return "Найдены следующие учебники:\n" + "\n".join(found_books[:5])
     
+    # Карта ключевых слов для общих вопросов
     keywords_map = {
         "режим работы": "=== РЕЖИМ РАБОТЫ ===",
         "часы работы": "=== РЕЖИМ РАБОТЫ ===",
@@ -158,7 +170,7 @@ def generate_ai_response(query: str, context: Optional[str] = None) -> str:
 Ответь дружелюбно, что для поиска книг лучше воспользоваться личным кабинетом на сайте http://edu.rucml.ru/ или обратиться к сотруднику библиотеки по телефону +7(499) 246-05-97.
 """
     
-    return generate_with_gemini(prompt, max_tokens=400)
+    return generate_with_groq(prompt, max_tokens=400)
 
 # === Эндпоинты ===
 @app.options("/chat")
