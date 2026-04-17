@@ -1,27 +1,29 @@
 """
 AI Библиотекарь - FastAPI сервер для чат-бота
-Версия с исправленным CORS
+Версия с прямым вызовом Google Gemini API
 """
 
 import os
 import re
 import json
-import requests
 from typing import Optional
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import google.generativeai as genai
 
 load_dotenv()
 
-# === Настройка ===
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-if not OPENROUTER_API_KEY:
-    raise ValueError("OPENROUTER_API_KEY не найден!")
+# === Настройка Gemini ===
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise ValueError("❌ GEMINI_API_KEY не найден в переменных окружения!")
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL_NAME = "google/gemini-2.0-flash-exp:free"
+genai.configure(api_key=GEMINI_API_KEY)
+# Выбираем быструю и бесплатную модель Gemini 2.5 Flash
+MODEL_NAME = "gemini-2.5-flash"
+model = genai.GenerativeModel(MODEL_NAME)
 
 # === Загрузка базы знаний ===
 with open("knowledge_base.txt", "r", encoding="utf-8") as f:
@@ -47,49 +49,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class Question(BaseModel):
     message: str
     history: Optional[list] = []
 
-
 class Answer(BaseModel):
     response: str
 
-
-# === Вызов OpenRouter через requests ===
-def call_openrouter(prompt: str, max_tokens: int = 400) -> str:
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/Anym0ree/Sechenov",
-        "X-Title": "LibraryBot"
-    }
-    
-    payload = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
-        "max_tokens": max_tokens
-    }
-    
+# === Вызов Google Gemini API ===
+def generate_with_gemini(prompt: str, max_tokens: int = 400) -> str:
+    """
+    Отправляет запрос к Gemini API и возвращает ответ.
+    Если API недоступен, возвращает стандартное сообщение об ошибке.
+    """
     try:
-        response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        return data["choices"][0]["message"]["content"].strip()
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                max_output_tokens=max_tokens,
+                temperature=0.3
+            )
+        )
+        return response.text.strip()
     except Exception as e:
-        print(f"Ошибка OpenRouter: {e}")
+        print(f"Ошибка Gemini: {e}")
         return "Извините, произошла ошибка. Пожалуйста, позвоните в библиотеку: +7(499) 246-05-97"
-
 
 # === Поиск в базе знаний ===
 def search_in_knowledge_base(query: str) -> Optional[str]:
+    """Поиск по ключевым словам в базе знаний, включая учебники."""
     query_lower = query.lower()
     
+    # Проверяем, спрашивают ли про книгу/учебник
     book_keywords = ["учебник", "книга", "атлас", "литература", "автор", "найти", "поиск", "есть ли"]
     is_book_query = any(kw in query_lower for kw in book_keywords)
     
+    # Если это запрос о книге, ищем в разделе учебников
     if is_book_query:
         lines = KNOWLEDGE_BASE.split('\n')
         books_section = False
@@ -113,6 +108,7 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
         if found_books:
             return "Найдены следующие учебники:\n" + "\n".join(found_books[:5])
     
+    # Карта ключевых слов для общих вопросов
     keywords_map = {
         "режим работы": "=== РЕЖИМ РАБОТЫ ===",
         "часы работы": "=== РЕЖИМ РАБОТЫ ===",
@@ -164,7 +160,6 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
     
     return None
 
-
 # === Генерация ответа через ИИ ===
 def generate_ai_response(query: str, context: Optional[str] = None) -> str:
     if context:
@@ -185,8 +180,7 @@ def generate_ai_response(query: str, context: Optional[str] = None) -> str:
 Ответь дружелюбно, что для поиска книг лучше воспользоваться личным кабинетом на сайте http://edu.rucml.ru/ или обратиться к сотруднику библиотеки по телефону +7(499) 246-05-97.
 """
     
-    return call_openrouter(prompt, max_tokens=400)
-
+    return generate_with_gemini(prompt, max_tokens=400)
 
 # === Эндпоинты ===
 @app.options("/chat")
@@ -206,11 +200,9 @@ async def chat(question: Question):
         ai_response = generate_ai_response(user_message)
         return Answer(response=ai_response)
 
-
 @app.get("/health")
 async def health():
     return {"status": "ok"}
-
 
 if __name__ == "__main__":
     import uvicorn
