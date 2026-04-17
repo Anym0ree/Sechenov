@@ -1,6 +1,6 @@
 """
 AI Библиотекарь - FastAPI сервер для чат-бота
-Версия на requests (без openai)
+Версия с исправленным CORS
 """
 
 import os
@@ -8,7 +8,7 @@ import re
 import json
 import requests
 from typing import Optional
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -30,6 +30,15 @@ with open("knowledge_base.txt", "r", encoding="utf-8") as f:
 # === FastAPI приложение ===
 app = FastAPI(title="Library AI Bot")
 
+# Принудительные CORS-заголовки
+@app.middleware("http")
+async def add_cors_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, HEAD"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -50,7 +59,6 @@ class Answer(BaseModel):
 
 # === Вызов OpenRouter через requests ===
 def call_openrouter(prompt: str, max_tokens: int = 400) -> str:
-    """Отправляет запрос к OpenRouter API и возвращает ответ."""
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -77,14 +85,11 @@ def call_openrouter(prompt: str, max_tokens: int = 400) -> str:
 
 # === Поиск в базе знаний ===
 def search_in_knowledge_base(query: str) -> Optional[str]:
-    """Поиск по ключевым словам в базе знаний, включая учебники."""
     query_lower = query.lower()
     
-    # Проверяем, спрашивают ли про книгу/учебник
     book_keywords = ["учебник", "книга", "атлас", "литература", "автор", "найти", "поиск", "есть ли"]
     is_book_query = any(kw in query_lower for kw in book_keywords)
     
-    # Если это запрос о книге, ищем в разделе учебников
     if is_book_query:
         lines = KNOWLEDGE_BASE.split('\n')
         books_section = False
@@ -108,7 +113,6 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
         if found_books:
             return "Найдены следующие учебники:\n" + "\n".join(found_books[:5])
     
-    # Карта ключевых слов для общих вопросов
     keywords_map = {
         "режим работы": "=== РЕЖИМ РАБОТЫ ===",
         "часы работы": "=== РЕЖИМ РАБОТЫ ===",
@@ -184,20 +188,21 @@ def generate_ai_response(query: str, context: Optional[str] = None) -> str:
     return call_openrouter(prompt, max_tokens=400)
 
 
-# === Главный эндпоинт ===
+# === Эндпоинты ===
+@app.options("/chat")
+async def options_chat():
+    return {"message": "OK"}
+
 @app.post("/chat", response_model=Answer)
 async def chat(question: Question):
     user_message = question.message
     
-    # 1. Ищем в базе знаний
     kb_result = search_in_knowledge_base(user_message)
     
     if kb_result:
-        # 2. Если нашли — просим ИИ красиво оформить
         ai_response = generate_ai_response(user_message, kb_result)
         return Answer(response=ai_response)
     else:
-        # 3. Если не нашли — вежливо отправляем к человеку
         ai_response = generate_ai_response(user_message)
         return Answer(response=ai_response)
 
