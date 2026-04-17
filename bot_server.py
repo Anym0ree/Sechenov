@@ -1,20 +1,14 @@
 """
 AI Библиотекарь - FastAPI сервер для чат-бота
-Версия с прямым вызовом Google Gemini API
+Версия с прямым вызовом Google Gemini API (без Pydantic)
 """
 
 import os
-import re
 import json
-from typing import List
 from typing import Optional
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from dotenv import load_dotenv
 import google.generativeai as genai
-
-load_dotenv()
 
 # === Настройка Gemini ===
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -22,7 +16,6 @@ if not GEMINI_API_KEY:
     raise ValueError("❌ GEMINI_API_KEY не найден в переменных окружения!")
 
 genai.configure(api_key=GEMINI_API_KEY)
-# Выбираем быструю и бесплатную модель Gemini 2.5 Flash
 MODEL_NAME = "gemini-2.5-flash"
 model = genai.GenerativeModel(MODEL_NAME)
 
@@ -33,7 +26,6 @@ with open("knowledge_base.txt", "r", encoding="utf-8") as f:
 # === FastAPI приложение ===
 app = FastAPI(title="Library AI Bot")
 
-# Принудительные CORS-заголовки
 @app.middleware("http")
 async def add_cors_headers(request: Request, call_next):
     response = await call_next(request)
@@ -50,19 +42,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class Question(BaseModel):
-    message: str
-    history: Optional[List] = []
-
-class Answer(BaseModel):
-    response: str
-
 # === Вызов Google Gemini API ===
 def generate_with_gemini(prompt: str, max_tokens: int = 400) -> str:
-    """
-    Отправляет запрос к Gemini API и возвращает ответ.
-    Если API недоступен, возвращает стандартное сообщение об ошибке.
-    """
     try:
         response = model.generate_content(
             prompt,
@@ -78,14 +59,11 @@ def generate_with_gemini(prompt: str, max_tokens: int = 400) -> str:
 
 # === Поиск в базе знаний ===
 def search_in_knowledge_base(query: str) -> Optional[str]:
-    """Поиск по ключевым словам в базе знаний, включая учебники."""
     query_lower = query.lower()
     
-    # Проверяем, спрашивают ли про книгу/учебник
     book_keywords = ["учебник", "книга", "атлас", "литература", "автор", "найти", "поиск", "есть ли"]
     is_book_query = any(kw in query_lower for kw in book_keywords)
     
-    # Если это запрос о книге, ищем в разделе учебников
     if is_book_query:
         lines = KNOWLEDGE_BASE.split('\n')
         books_section = False
@@ -109,7 +87,6 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
         if found_books:
             return "Найдены следующие учебники:\n" + "\n".join(found_books[:5])
     
-    # Карта ключевых слов для общих вопросов
     keywords_map = {
         "режим работы": "=== РЕЖИМ РАБОТЫ ===",
         "часы работы": "=== РЕЖИМ РАБОТЫ ===",
@@ -188,18 +165,19 @@ def generate_ai_response(query: str, context: Optional[str] = None) -> str:
 async def options_chat():
     return {"message": "OK"}
 
-@app.post("/chat", response_model=Answer)
-async def chat(question: Question):
-    user_message = question.message
+@app.post("/chat")
+async def chat(request: Request):
+    data = await request.json()
+    user_message = data.get("message", "")
     
     kb_result = search_in_knowledge_base(user_message)
     
     if kb_result:
         ai_response = generate_ai_response(user_message, kb_result)
-        return Answer(response=ai_response)
     else:
         ai_response = generate_ai_response(user_message)
-        return Answer(response=ai_response)
+        
+    return {"response": ai_response}
 
 @app.get("/health")
 async def health():
