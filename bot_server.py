@@ -6,6 +6,7 @@ AI Библиотекарь - FastAPI сервер для чат-бота
 import os
 import re
 import json
+from typing import List
 from typing import Optional
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,7 +52,7 @@ app.add_middleware(
 
 class Question(BaseModel):
     message: str
-    history: Optional[list] = []
+    history: Optional[List] = []
 
 class Answer(BaseModel):
     response: str
