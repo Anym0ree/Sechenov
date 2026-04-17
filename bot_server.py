@@ -1,5 +1,5 @@
 """
-AI Библиотекарь - Умная версия с гибким поиском и поддержкой вопросов о руководстве
+AI Библиотекарь - Умный поиск по сайту через Serper.dev
 """
 
 import os
@@ -8,12 +8,16 @@ from typing import Optional
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+# === Настройки ===
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    raise ValueError("❌ GROQ_API_KEY не найден в переменных окружения!")
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
+
+if not all([GROQ_API_KEY, SERPER_API_KEY]):
+    raise ValueError("❌ Не все ключи API найдены в переменных окружения!")
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL_NAME = "llama-3.3-70b-versatile"
+SERPER_URL = "https://google.serper.dev/search"
 
 with open("knowledge_base.txt", "r", encoding="utf-8") as f:
     KNOWLEDGE_BASE = f.read()
@@ -37,8 +41,16 @@ app.add_middleware(
 )
 
 def generate_with_groq(prompt: str, max_tokens: int = 500) -> str:
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": MODEL_NAME, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2, "max_tokens": max_tokens}
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "max_tokens": max_tokens
+    }
     try:
         response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
@@ -46,6 +58,39 @@ def generate_with_groq(prompt: str, max_tokens: int = 500) -> str:
     except Exception as e:
         print(f"Ошибка Groq: {e}")
         return "Извините, произошла техническая ошибка. Пожалуйста, позвоните в библиотеку: +7(499) 246-05-97"
+
+def search_on_website(query: str) -> Optional[str]:
+    """Ищет информацию на сайте библиотеки через Serper.dev."""
+    headers = {
+        "X-API-KEY": SERPER_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "q": f"site:edu.rucml.ru {query}",
+        "gl": "ru",
+        "hl": "ru",
+        "num": 5
+    }
+    
+    try:
+        response = requests.post(SERPER_URL, headers=headers, json=payload, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        
+        snippets = []
+        for item in data.get("organic", []):
+            title = item.get("title", "")
+            snippet = item.get("snippet", "")
+            link = item.get("link", "")
+            if snippet:
+                snippets.append(f"📄 {title}\n{snippet}\n🔗 {link}")
+        
+        if snippets:
+            return "\n\n---\n\n".join(snippets[:3])
+        return None
+    except Exception as e:
+        print(f"Ошибка поиска по сайту через Serper: {e}")
+        return None
 
 def search_in_knowledge_base(query: str) -> Optional[str]:
     query_lower = query.lower()
@@ -60,7 +105,8 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
                 books_section = True
                 continue
             elif books_section:
-                if line.startswith("==="): break
+                if line.startswith("==="):
+                    break
                 if line.strip():
                     line_lower = line.lower()
                     stop_words = ["учебник", "книга", "атлас", "есть", "ли", "в", "по", "для", "автор", "найти"]
@@ -75,13 +121,13 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
         (["режим", "часы", "работает", "открыта", "закрыта", "график", "во сколько", "время работы"], "=== РЕЖИМ РАБОТЫ ==="),
         (["санитарный"], "Санитарный день: проводится раз в месяц (дата публикуется на сайте)"),
         (["телефон", "контакты", "позвонить", "связаться", "номер"], "=== КОНТАКТЫ ==="),
-        (["директор", "руководство", "абрамова", "заместитель", "начальник"], "=== РУКОВОДСТВО БИБЛИОТЕКИ ==="),
+        (["директор", "руководство", "абрамова", "заместитель", "начальник", "кто руководит"], "=== РУКОВОДСТВО БИБЛИОТЕКИ ==="),
         (["кампусная", "карта", "читательский билет"], "=== КАМПУСНАЯ КАРТА ==="),
         (["мфц"], "Адрес МФЦ: Москва, ул. Трубецкая, д.8, стр. 2"),
         (["получить", "выдача", "взять книгу"], "=== КАК ПОЛУЧИТЬ УЧЕБНИКИ ==="),
         (["долг", "задолженность", "потерял", "утеряна", "сдать"], "=== ДОЛГИ И ЗАДОЛЖЕННОСТИ ==="),
         (["личный кабинет", "логин", "пароль", "авторизация"], "=== ЛИЧНЫЙ КАБИНЕТ ==="),
-        (["адрес", "находится", "проехать", "пройти", "найти библиотеку", "добраться", "расположение", "метро"], "=== АДРЕС ==="),
+        (["адрес", "находится", "проехать", "пройти", "найти библиотеку", "добраться", "расположение", "метро", "как пройти"], "=== АДРЕС ==="),
         (["электронные", "ресурсы", "базы", "medbasegeotar", "voka", "знаниум", "ивис"], "=== ДОСТУПНЫЕ ЭЛЕКТРОННЫЕ РЕСУРСЫ ==="),
     ]
     
@@ -95,33 +141,29 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
                         in_section = True
                         result.append(line)
                     elif in_section:
-                        if line.startswith("==="): break
-                        if line.strip(): result.append(line)
+                        if line.startswith("==="):
+                            break
+                        if line.strip():
+                            result.append(line)
                 return '\n'.join(result)
             else:
                 return section
     return None
 
-def generate_ai_response(query: str, context: Optional[str] = None) -> str:
-    if context:
-        prompt = f"""
+def generate_ai_response(query: str, context: str, source: str = "локальной базы") -> str:
+    prompt = f"""
 Ты — вежливый и полезный виртуальный библиотекарь Фундаментальной учебной библиотеки Сеченовского университета.
 
-У тебя есть следующая информация из базы знаний:
+Используй ТОЛЬКО информацию, предоставленную ниже (источник: {source}). 
+Не придумывай факты. Если информации недостаточно для точного ответа, честно скажи об этом и предложи обратиться к сотруднику библиотеки лично или по телефону +7(499) 246-05-97.
+
+Информация:
 {context}
 
-Ответь на вопрос посетителя, используя ТОЛЬКО эту информацию. Если информации недостаточно для полного ответа, честно скажи об этом и предложи обратиться к сотруднику библиотеки лично или по телефону +7(499) 246-05-97.
-
-Вопрос: {query}
+Вопрос посетителя: {query}
 
 Твой ответ:
 """
-    else:
-        prompt = f"""
-Ты — вежливый библиотекарь. На вопрос «{query}» у тебя нет информации в базе знаний.
-Ответь дружелюбно, что лучше обратиться к сотруднику библиотеки лично или по телефону +7(499) 246-05-97.
-"""
-    
     return generate_with_groq(prompt, max_tokens=500)
 
 @app.options("/chat")
@@ -135,9 +177,20 @@ async def chat(request: Request):
     if not user_message:
         return {"response": "Пожалуйста, задайте вопрос."}
     
-    kb_result = search_in_knowledge_base(user_message)
-    ai_response = generate_ai_response(user_message, kb_result) if kb_result else generate_ai_response(user_message)
-    return {"response": ai_response}
+    # 1. Ищем в локальной базе знаний
+    local_result = search_in_knowledge_base(user_message)
+    if local_result:
+        ai_response = generate_ai_response(user_message, local_result, "локальной базы знаний")
+        return {"response": ai_response}
+    
+    # 2. Если в локальной базе нет — ищем на сайте через Serper
+    web_result = search_on_website(user_message)
+    if web_result:
+        ai_response = generate_ai_response(user_message, web_result, "поиска по сайту библиотеки")
+        return {"response": ai_response}
+    
+    # 3. Если ничего не нашли
+    return {"response": "К сожалению, я не смог найти ответ на ваш вопрос ни в локальной базе, ни на сайте библиотеки. Рекомендую обратиться к сотруднику библиотеки лично или по телефону +7(499) 246-05-97."}
 
 @app.get("/health")
 async def health():
