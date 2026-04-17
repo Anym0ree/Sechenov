@@ -1,6 +1,6 @@
 """
 AI Библиотекарь - FastAPI сервер для чат-бота
-Версия с прямым вызовом Google Gemini API (без Pydantic)
+Версия с прямым вызовом Google Gemini API (без Pydantic и dotenv)
 """
 
 import os
