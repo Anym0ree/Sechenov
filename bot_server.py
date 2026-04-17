@@ -129,18 +129,7 @@ def generate_ai_response(query: str, context: Optional[str] = None) -> str:
 async def options_chat():
     return {"message": "OK"}
 
-@app.post("/chat")
-async def chat(request: Request):
-    data = await request.json()
-    user_message = data.get("message", "").strip()
-    if not user_message:
-        return {"response": "Пожалуйста, задайте вопрос."}
-    if not is_library_related(user_message):
-        return {"response": "Я отвечаю только на вопросы о библиотеке Сеченовского университета."}
-    
-    kb_result = search_in_knowledge_base(user_message)
-    ai_response = generate_ai_response(user_message, kb_result) if kb_result else "К сожалению, в моей базе знаний нет ответа на этот вопрос. Рекомендую обратиться к сотруднику библиотеки лично или по телефону +7(499) 246-05-97."
-    return {"response": ai_response}
+
 
 @app.get("/health")
 async def health():
