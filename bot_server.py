@@ -1,14 +1,14 @@
 """
-AI Библиотекарь — Умный ассистент Фундаментальной библиотеки Сеченовского Университета
-Поддерживает естественные запросы на русском языке с учётом синонимов и опечаток.
+AI Библиотекарь — Мультиязычный ассистент Фундаментальной библиотеки Сеченовского Университета
+Поддерживает русский (ru), английский (en), китайский (zh).
 """
 
 import os
 import re
 import html
 import requests
-from typing import Optional, List, Tuple
-from fastapi import FastAPI, Request
+from typing import Optional, List, Tuple, Dict
+from fastapi import FastAPI, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 # === Настройки ===
@@ -35,9 +35,68 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# === Языковые настройки ===
+SUPPORTED_LANGUAGES = {"ru", "en", "zh"}
+
+# Словари переводов статических сообщений
+TRANSLATIONS: Dict[str, Dict[str, str]] = {
+    "welcome": {
+        "ru": (
+            "👋 Добро пожаловать в Фундаментальную учебную библиотеку Сеченовского Университета!\n\n"
+            "Я — ваш виртуальный помощник. Я могу:\n"
+            "• подсказать режим работы и адрес;\n"
+            "• объяснить, как записаться и получить учебники;\n"
+            "• рассказать о контактах, руководстве и правилах;\n"
+            "• помочь найти популярные учебники и электронные ресурсы.\n\n"
+            "Просто напишите свой вопрос, и я постараюсь быстро найти ответ. "
+            "Если потребуется помощь сотрудника — звоните +7(499) 246-05-97."
+        ),
+        "en": (
+            "👋 Welcome to the Fundamental Educational Library of Sechenov University!\n\n"
+            "I am your virtual assistant. I can help you with:\n"
+            "• Opening hours and address;\n"
+            "• How to register and borrow textbooks;\n"
+            "• Contacts, administration, and rules;\n"
+            "• Finding popular textbooks and electronic resources.\n\n"
+            "Just type your question, and I will try to find the answer quickly. "
+            "If you need staff assistance, please call +7(499) 246-05-97."
+        ),
+        "zh": (
+            "👋 欢迎来到谢切诺夫大学基础教学图书馆！\n\n"
+            "我是您的虚拟助手。我可以帮助您：\n"
+            "• 查询开放时间和地址；\n"
+            "• 了解如何注册和借阅教科书；\n"
+            "• 获取联系方式、管理人员信息和规章制度；\n"
+            "• 查找热门教科书和电子资源。\n\n"
+            "只需输入您的问题，我会尽快为您查找答案。"
+            "如果您需要工作人员帮助，请致电 +7(499) 246-05-97。"
+        )
+    },
+    "empty_message": {
+        "ru": "👋 Здравствуйте! Я — виртуальный библиотекарь. Спросите меня о режиме работы, адресе, записи, учебниках или контактах — я с радостью помогу!",
+        "en": "👋 Hello! I'm a virtual librarian. Ask me about opening hours, address, registration, textbooks or contacts — I'll be happy to help!",
+        "zh": "👋 您好！我是虚拟图书馆员。请向我询问开放时间、地址、注册、教科书或联系方式——我很乐意为您提供帮助！"
+    },
+    "not_found": {
+        "ru": "😔 К сожалению, я не смог найти ответ на ваш вопрос. Пожалуйста, обратитесь к сотруднику библиотеки лично или по телефону +7(499) 246-05-97.",
+        "en": "😔 Unfortunately, I couldn't find an answer to your question. Please contact the library staff in person or by phone +7(499) 246-05-97.",
+        "zh": "😔 抱歉，我未能找到您问题的答案。请亲自联系图书馆工作人员或致电 +7(499) 246-05-97。"
+    },
+    "error": {
+        "ru": "Извините, произошла техническая ошибка. Пожалуйста, позвоните в библиотеку: +7(499) 246-05-97",
+        "en": "Sorry, a technical error occurred. Please call the library: +7(499) 246-05-97",
+        "zh": "抱歉，发生技术错误。请致电图书馆：+7(499) 246-05-97"
+    }
+}
+
+def get_translation(key: str, lang: str) -> str:
+    """Получить перевод для заданного ключа и языка (fallback на русский)."""
+    if lang not in SUPPORTED_LANGUAGES:
+        lang = "ru"
+    return TRANSLATIONS.get(key, {}).get(lang, TRANSLATIONS[key]["ru"])
+
 # === Утилиты ===
 def clean_text(text: str) -> str:
-    """Очистка текста от HTML-сущностей и лишних символов."""
     if not text:
         return ""
     text = html.unescape(text)
@@ -47,14 +106,12 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 def normalize_query(text: str) -> str:
-    """Приведение запроса к нижнему регистру, удаление знаков препинания."""
     text = text.lower()
     text = re.sub(r'[^\w\s]', ' ', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
 def jaccard_similarity(a: str, b: str) -> float:
-    """Простая мера схожести двух строк (коэффициент Жаккара)."""
     set_a = set(a.split())
     set_b = set(b.split())
     if not set_a or not set_b:
@@ -62,15 +119,14 @@ def jaccard_similarity(a: str, b: str) -> float:
     return len(set_a & set_b) / len(set_a | set_b)
 
 def contains_any_word(text: str, words: List[str]) -> bool:
-    """Проверяет, содержит ли текст хотя бы одно слово из списка (с учётом границ слов)."""
     text_norm = normalize_query(text)
     for w in words:
         if re.search(rf'\b{re.escape(w)}\b', text_norm):
             return True
     return False
 
-# === Генерация через Groq ===
-def generate_with_groq(prompt: str, max_tokens: int = 600) -> str:
+# === Генерация через Groq (с языком) ===
+def generate_with_groq(prompt: str, lang: str = "ru", max_tokens: int = 600) -> str:
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
@@ -87,9 +143,9 @@ def generate_with_groq(prompt: str, max_tokens: int = 600) -> str:
         return clean_text(response.json()["choices"][0]["message"]["content"].strip())
     except Exception as e:
         print(f"Ошибка Groq: {e}")
-        return "Извините, произошла техническая ошибка. Пожалуйста, позвоните в библиотеку: +7(499) 246-05-97"
+        return get_translation("error", lang)
 
-# === Поиск по сайту через Serper ===
+# === Поиск по сайту (только русскоязычный, результат будет переведён LLM) ===
 def search_on_website(query: str) -> Optional[str]:
     headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
     priority_restrictions = [
@@ -120,12 +176,11 @@ def search_on_website(query: str) -> Optional[str]:
             continue
     return None
 
-# === Умный локальный поиск (с расширенными синонимами и нечёткостью) ===
+# === Локальный поиск (аналогично, только по русской базе) ===
 def search_in_knowledge_base(query: str) -> Optional[str]:
     norm_query = normalize_query(query)
 
-    # ------------------- Поиск учебников (специальная обработка) -------------------
-    # Ключевые слова, указывающие на запрос учебной литературы
+    # Ключевые слова на русском (т.к. база на русском)
     book_intent_words = [
         "учебник", "учебники", "учебного", "учебную", "учебной",
         "книга", "книги", "книгу", "книгой", "книжку", "книжка",
@@ -142,8 +197,6 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
         "хрестоматия", "хрестоматии",
     ]
     if contains_any_word(norm_query, book_intent_words):
-        # Извлекаем авторов и ключевые слова из запроса
-        # Сначала попробуем найти точные совпадения по фамилиям авторов и названиям
         lines = KNOWLEDGE_BASE.split('\n')
         books_section = False
         found_books = []
@@ -156,14 +209,11 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
                     break
                 if line.strip():
                     line_norm = normalize_query(line)
-                    # Проверяем совпадение по авторам (например, "привес", "сапин", "синельников")
                     authors_from_line = re.findall(r'[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){1,2}', line)
                     all_words_line = set(re.findall(r'[а-яё]+', line_norm))
                     query_words = set(re.findall(r'[а-яё]+', norm_query))
-                    # Если есть пересечение слов запроса с названием или авторами
                     if query_words & all_words_line:
                         found_books.append(line.strip())
-                    # Дополнительно: ищем по фамилиям отдельно (если пользователь написал "привес" или "сапин")
                     for author_part in ["привес", "лысенков", "бушкович", "сапин", "синельников",
                                         "покровский", "коротько", "березов", "коровкин",
                                         "афанасьев", "юрина", "струков", "серов", "харкевич", "поздеев"]:
@@ -171,67 +221,50 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
                             found_books.append(line.strip())
                             break
         if found_books:
-            # Убираем дубликаты
             found_books = list(dict.fromkeys(found_books))
             return clean_text("Найдены следующие учебники:\n" + "\n".join(found_books[:5]))
-        # Если книги не найдены, но запрос явно про учебники, вернём общую рекомендацию
         return clean_text("Пожалуйста, уточните название или автора учебника. Популярные учебники можно посмотреть в разделе «Популярные учебники» на сайте.")
 
-    # ------------------- Мега-карта разделов (расширенные синонимы) -------------------
     sections_map: List[Tuple[List[str], str]] = [
-        # Режим работы
         (["режим", "часы", "работает", "открыта", "закрыта", "график", "во сколько", "время",
           "расписание", "обед", "перерыв", "выходной", "праздник", "санитарный", "санитарный день",
           "работа библиотеки", "когда открывается", "когда закрывается", "до скольки", "со скольки",
           "часы работы", "график работы", "режим работы", "рабочие часы"], "=== РЕЖИМ РАБОТЫ ==="),
-        # Контакты
         (["телефон", "контакты", "позвонить", "связаться", "номер", "почта", "email", "mail",
           "факс", "телефонная книга", "контактная информация", "телефоны", "адрес электронной почты",
           "как связаться", "куда звонить"], "=== КОНТАКТЫ ==="),
-        # Руководство
         (["директор", "руководство", "абрамова", "заместитель", "зам", "левин", "начальник",
           "администрация", "деканат", "ректор", "проректор", "управление", "кадры", "отдел",
           "кто директор", "фамилия директора", "заместитель директора"], "=== РУКОВОДСТВО И АДМИНИСТРАЦИЯ ==="),
-        # Кампусная карта / читательский билет
         (["кампусная", "карта", "читательский", "билет", "пропуск", "удостоверение", "студенческий",
           "кампусную карту", "читательский билет", "студенческий билет", "электронный пропуск",
           "получить карту", "оформить билет", "кампусная карта где получить"], "=== КАМПУСНАЯ КАРТА ==="),
-        # МФЦ
         (["мфц", "многофункциональный центр", "центр обслуживания", "получить кампусную карту мфц"],
          "Адрес МФЦ: Москва, ул. Трубецкая, д.8, стр.2, вход со двора."),
-        # Получение учебников
         (["получить", "выдача", "взять", "заказать", "заказ", "бронь", "учебники", "литературу",
           "книги", "получение книг", "как получить учебники", "заказ учебников", "бронирование книг",
           "взять книги", "получить литературу"], "=== КАК ПОЛУЧИТЬ УЧЕБНИКИ ==="),
-        # Долги
         (["долг", "задолженность", "потерял", "утеряна", "сдать", "просрочка", "штраф", "пени",
           "возврат", "вернуть книги", "срок сдачи", "книговозвратчик", "просроченные книги",
           "что делать если потерял книгу"], "=== ДОЛГИ И ЗАДОЛЖЕННОСТИ ==="),
-        # Личный кабинет
         (["личный кабинет", "логин", "пароль", "авторизация", "вход", "аккаунт", "профиль",
           "учетная запись", "регистрация", "войти в личный кабинет", "как зайти в лк",
           "пароль от личного кабинета", "логин для входа"], "=== ЛИЧНЫЙ КАБИНЕТ ==="),
-        # Адрес
         (["адрес", "находится", "находиться", "местонахождение", "где находится", "проехать",
           "пройти", "добраться", "расположение", "метро", "карта", "схема", "маршрут", "парковка",
           "как найти библиотеку", "как пройти", "станция метро", "ближайшее метро", "Зубовский бульвар"],
          "=== АДРЕС ==="),
-        # Электронные ресурсы
         (["электронные", "ресурсы", "базы", "знаниум", "ивис", "подписка", "доступ", "удаленка",
           "электронная библиотека", "znanium", "ivis", "эко-вектор", "удалённый доступ",
           "как зайти в электронную библиотеку", "доступ к базам"], "=== ДОСТУПНЫЕ ЭЛЕКТРОННЫЕ РЕСУРСЫ ==="),
-        # Обратная связь
         (["обратная связь", "отзыв", "предложение", "жалоба", "пожаловаться", "вопрос", "поддержка",
           "помощь", "написать отзыв", "оставить жалобу", "форма обратной связи"], "=== ОБРАТНАЯ СВЯЗЬ ==="),
-        # Запись в библиотеку
         (["запись", "записаться", "стать читателем", "читательский билет", "первый раз",
           "как записаться в библиотеку", "правила записи", "запись в библиотеку"],
          "=== ЗАПИСЬ В БИБЛИОТЕКУ ==="),
-        # Документы и правила
         (["документы", "правила", "положение", "устав", "регламент", "инструкция", "бланк",
           "заявление", "образец", "правила пользования", "положение о библиотеке", "выписка из правил"],
          "=== ДОКУМЕНТЫ И ПРАВИЛА ==="),
-        # Новые поступления
         (["новые поступления", "новинки", "поступило", "свежие", "новые книги", "что нового"],
          "=== НОВЫЕ ПОСТУПЛЕНИЯ ==="),
     ]
@@ -240,18 +273,15 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
     best_score = 0.0
 
     for keywords, section in sections_map:
-        # 1. Точное вхождение любого ключевого слова
         if contains_any_word(norm_query, keywords):
             best_match = section
             break
-        # 2. Нечёткое сравнение (вычисляем максимальную схожесть)
         for kw in keywords:
             score = jaccard_similarity(norm_query, kw)
             if score > best_score:
                 best_score = score
                 best_match = section
 
-    # Порог для нечёткого срабатывания снижен до 0.25, чтобы ловить опечатки
     if best_match and best_score >= 0.25:
         if best_match.startswith("==="):
             lines = KNOWLEDGE_BASE.split('\n')
@@ -271,14 +301,20 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
 
     return None
 
-# === Генерация ответа через ИИ ===
-def generate_ai_response(query: str, context: str, source: str = "локальной базы") -> str:
+# === Генерация ответа через ИИ с учётом языка ===
+def generate_ai_response(query: str, context: str, source: str, lang: str) -> str:
+    # Промпт с требованием отвечать на нужном языке
+    language_instruction = {
+        "ru": "Отвечай на русском языке.",
+        "en": "Answer in English. Translate any Russian context into English naturally.",
+        "zh": "用中文回答。将俄语内容自然地翻译成中文。"
+    }
     prompt = f"""
 Ты — заботливый и вежливый виртуальный библиотекарь Фундаментальной учебной библиотеки Сеченовского Университета.
 Твоя задача — дать чёткий и полезный ответ, основанный ТОЛЬКО на предоставленном контексте.
 Не выдумывай факты, не добавляй лишней информации.
 Если в контексте есть ссылки, оформляй их в формате Markdown: [название](ссылка).
-Старайся отвечать дружелюбно, можно использовать эмодзи, но не перебарщивай.
+{language_instruction.get(lang, language_instruction["ru"])}
 
 Источник: {source}
 Контекст:
@@ -288,23 +324,14 @@ def generate_ai_response(query: str, context: str, source: str = "локальн
 
 Твой ответ:
 """
-    return generate_with_groq(prompt, max_tokens=600)
+    return generate_with_groq(prompt, lang, max_tokens=600)
 
 # === Эндпоинты ===
 @app.get("/welcome")
-async def welcome():
-    return {
-        "response": (
-            "👋 Добро пожаловать в Фундаментальную учебную библиотеку Сеченовского Университета!\n\n"
-            "Я — ваш виртуальный помощник. Я могу:\n"
-            "• подсказать режим работы и адрес;\n"
-            "• объяснить, как записаться и получить учебники;\n"
-            "• рассказать о контактах, руководстве и правилах;\n"
-            "• помочь найти популярные учебники и электронные ресурсы.\n\n"
-            "Просто напишите свой вопрос, и я постараюсь быстро найти ответ. "
-            "Если потребуется помощь сотрудника — звоните +7(499) 246-05-97."
-        )
-    }
+async def welcome(lang: str = Query("ru", description="Язык приветствия (ru, en, zh)")):
+    if lang not in SUPPORTED_LANGUAGES:
+        lang = "ru"
+    return {"response": get_translation("welcome", lang)}
 
 @app.options("/chat")
 async def options_chat():
@@ -314,28 +341,25 @@ async def options_chat():
 async def chat(request: Request):
     data = await request.json()
     user_message = data.get("message", "").strip()
+    lang = data.get("lang", "ru")
+    if lang not in SUPPORTED_LANGUAGES:
+        lang = "ru"
 
     if not user_message:
-        return {"response": (
-            "👋 Здравствуйте! Я — виртуальный библиотекарь. "
-            "Спросите меня о режиме работы, адресе, записи, учебниках или контактах — я с радостью помогу!"
-        )}
+        return {"response": get_translation("empty_message", lang)}
 
-    # 1. Локальный поиск
+    # 1. Локальный поиск (всегда на русском, т.к. база русская)
     local_result = search_in_knowledge_base(user_message)
     if local_result:
-        return {"response": generate_ai_response(user_message, local_result, "локальной базы знаний")}
+        return {"response": generate_ai_response(user_message, local_result, "локальной базы знаний", lang)}
 
     # 2. Поиск по сайту
     web_result = search_on_website(user_message)
     if web_result:
-        return {"response": generate_ai_response(user_message, web_result, "поиска по сайту библиотеки")}
+        return {"response": generate_ai_response(user_message, web_result, "поиска по сайту библиотеки", lang)}
 
     # 3. Ничего не найдено
-    return {"response": (
-        "😔 К сожалению, я не смог найти ответ на ваш вопрос. "
-        "Пожалуйста, обратитесь к сотруднику библиотеки лично или по телефону +7(499) 246-05-97."
-    )}
+    return {"response": get_translation("not_found", lang)}
 
 @app.get("/health")
 async def health():
