@@ -1,5 +1,5 @@
 """
-AI Библиотекарь - Финальная версия с улучшенным поиском и фильтрацией
+AI Библиотекарь — Умный ассистент Фундаментальной библиотеки Сеченовского Университета
 """
 
 import os
@@ -26,14 +26,7 @@ with open("knowledge_base.txt", "r", encoding="utf-8") as f:
 
 app = FastAPI(title="Library AI Bot")
 
-@app.middleware("http")
-async def add_cors_headers(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, HEAD"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    return response
-
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -42,8 +35,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# === Очистка текста от мусора ===
+# === Утилиты ===
 def clean_text(text: str) -> str:
+    """Очистка текста от HTML-сущностей и лишних символов."""
     if not text:
         return ""
     text = html.unescape(text)
@@ -52,6 +46,22 @@ def clean_text(text: str) -> str:
     text = re.sub(r'[^\w\sа-яА-ЯёЁa-zA-Z0-9\.,!?;:\-–—«»""''()\[\]{}@/]', '', text, flags=re.IGNORECASE)
     return text.strip()
 
+def normalize_query(text: str) -> str:
+    """Приведение запроса к нижнему регистру, удаление знаков препинания."""
+    text = text.lower()
+    text = re.sub(r'[^\w\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+def jaccard_similarity(a: str, b: str) -> float:
+    """Простая мера схожести двух строк (коэффициент Жаккара)."""
+    set_a = set(a.split())
+    set_b = set(b.split())
+    if not set_a or not set_b:
+        return 0.0
+    return len(set_a & set_b) / len(set_a | set_b)
+
+# === Генерация через Groq ===
 def generate_with_groq(prompt: str, max_tokens: int = 600) -> str:
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -71,59 +81,43 @@ def generate_with_groq(prompt: str, max_tokens: int = 600) -> str:
         print(f"Ошибка Groq: {e}")
         return "Извините, произошла техническая ошибка. Пожалуйста, позвоните в библиотеку: +7(499) 246-05-97"
 
-# === Умный поиск по сайту через Serper (с жёсткой фильтрацией) ===
+# === Поиск по сайту через Serper ===
 def search_on_website(query: str) -> Optional[str]:
-    headers = {
-        "X-API-KEY": SERPER_API_KEY,
-        "Content-Type": "application/json"
-    }
-    
-    # Приоритетные разделы для поиска
+    headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
     priority_restrictions = [
         "site:edu.rucml.ru/wlib/documents/",
         "site:edu.rucml.ru/wlib/contacts",
         "site:edu.rucml.ru/wlib/about",
     ]
-    
     for restriction in priority_restrictions:
-        payload = {
-            "q": f"{restriction} {query}",
-            "gl": "ru", "hl": "ru", "num": 3
-        }
+        payload = {"q": f"{restriction} {query}", "gl": "ru", "hl": "ru", "num": 3}
         try:
             response = requests.post(SERPER_URL, headers=headers, json=payload, timeout=10)
             response.raise_for_status()
             data = response.json()
-            
             snippets = []
             for item in data.get("organic", []):
                 title = clean_text(item.get("title", ""))
                 snippet = clean_text(item.get("snippet", ""))
                 link = item.get("link", "")
-                
-                # Игнорируем новости, партнёрские материалы и т.д.
                 exclude_keywords = ["medbasegeotar", "accessmedicine", "prog_sem", "new_books", "elzevir", "double3", "tem_plan", "request1", "онлайн-курсы", "директ-академии"]
                 if any(ex in (title + snippet).lower() for ex in exclude_keywords):
                     continue
-                
                 if snippet and len(snippet) > 25:
                     snippets.append(f"📄 {title}\n{snippet}\n🔗 {link}")
-            
             if snippets:
                 return "\n\n---\n\n".join(snippets[:2])
         except Exception as e:
             print(f"Ошибка поиска в {restriction}: {e}")
             continue
-            
     return None
 
-# === Расширенный локальный поиск с мощным словарём синонимов ===
+# === Умный локальный поиск (с нечётким сопоставлением) ===
 def search_in_knowledge_base(query: str) -> Optional[str]:
-    query_lower = query.lower()
+    norm_query = normalize_query(query)
     
-    # 1. Поиск книг
-    book_keywords = ["учебник", "книга", "атлас", "литература", "автор", "пособие", "руководство", "монография", "издание"]
-    if any(kw in query_lower for kw in book_keywords):
+    # Поиск учебников (специальная обработка)
+    if any(kw in norm_query for kw in ["учебник", "книга", "атлас", "литература", "автор", "пособие", "руководство", "монография"]):
         lines = KNOWLEDGE_BASE.split('\n')
         books_section, found_books = False, []
         for line in lines:
@@ -133,62 +127,80 @@ def search_in_knowledge_base(query: str) -> Optional[str]:
             elif books_section:
                 if line.startswith("==="): break
                 if line.strip():
-                    line_lower = line.lower()
-                    stop_words = ["учебник", "книга", "атлас", "есть", "ли", "в", "по", "для", "автор", "найти", "пособие"]
-                    search_terms = [w for w in query_lower.split() if w not in stop_words]
-                    if any(term in line_lower for term in search_terms):
+                    line_norm = normalize_query(line)
+                    # Считаем схожесть с запросом
+                    if jaccard_similarity(norm_query, line_norm) > 0.1:
                         found_books.append(line.strip())
         if found_books:
             return clean_text("Найдены следующие учебники:\n" + "\n".join(found_books[:5]))
 
-    # 2. Мега-карта синонимов для всех разделов
-    keyword_groups = [
+    # Мега-карта разделов (с синонимами)
+    sections_map = [
         (["режим", "часы", "работает", "открыта", "закрыта", "график", "во сколько", "время", "расписание", "обед", "перерыв", "выходной", "праздник", "санитарный"], "=== РЕЖИМ РАБОТЫ ==="),
-        (["телефон", "контакты", "позвонить", "связаться", "номер", "почта", "email", "mail", "факс", "телефонная книга"], "=== КОНТАКТЫ ==="),
-        (["директор", "руководство", "абрамова", "заместитель", "зам", "левин", "начальник", "администрация", "деканат", "ректор", "проректор", "управление", "кадры", "отдел"], "=== РУКОВОДСТВО И АДМИНИСТРАЦИЯ ==="),
+        (["телефон", "контакты", "позвонить", "связаться", "номер", "почта", "email", "mail", "факс"], "=== КОНТАКТЫ ==="),
+        (["директор", "руководство", "абрамова", "заместитель", "зам", "левин", "начальник", "администрация", "деканат", "ректор"], "=== РУКОВОДСТВО И АДМИНИСТРАЦИЯ ==="),
         (["кампусная", "карта", "читательский", "билет", "пропуск", "удостоверение", "студенческий"], "=== КАМПУСНАЯ КАРТА ==="),
         (["мфц", "многофункциональный центр"], "Адрес МФЦ: Москва, ул. Трубецкая, д.8, стр.2, вход со двора."),
         (["получить", "выдача", "взять", "заказать", "заказ", "бронь", "учебники", "литературу", "книги"], "=== КАК ПОЛУЧИТЬ УЧЕБНИКИ ==="),
         (["долг", "задолженность", "потерял", "утеряна", "сдать", "просрочка", "штраф", "пени", "возврат"], "=== ДОЛГИ И ЗАДОЛЖЕННОСТИ ==="),
         (["личный кабинет", "логин", "пароль", "авторизация", "вход", "аккаунт", "профиль", "учетная запись", "регистрация"], "=== ЛИЧНЫЙ КАБИНЕТ ==="),
-        (["адрес", "находится", "находиться", "местонахождение", "где находится", "проехать", "пройти", "найти", "добраться", "расположение", "метро", "карта", "схема", "маршрут", "парковка"], "=== АДРЕС ==="),
-        (["электронные", "ресурсы", "базы", "medbasegeotar", "voka", "знаниум", "ивис", "подписка", "доступ", "удаленка"], "=== ДОСТУПНЫЕ ЭЛЕКТРОННЫЕ РЕСУРСЫ ==="),
+        (["адрес", "находится", "находиться", "местонахождение", "где находится", "проехать", "пройти", "добраться", "расположение", "метро", "карта", "схема", "маршрут", "парковка"], "=== АДРЕС ==="),
+        (["электронные", "ресурсы", "базы", "знаниум", "ивис", "подписка", "доступ", "удаленка"], "=== ДОСТУПНЫЕ ЭЛЕКТРОННЫЕ РЕСУРСЫ ==="),
         (["обратная связь", "отзыв", "предложение", "жалоба", "пожаловаться", "вопрос", "поддержка", "помощь"], "=== ОБРАТНАЯ СВЯЗЬ ==="),
         (["запись", "записаться", "стать читателем", "читательский билет", "первый раз"], "=== ЗАПИСЬ В БИБЛИОТЕКУ ==="),
-        (["документы", "правила", "положение", "устав", "регламент", "инструкция", "бланк", "заявление", "образец"], "=== ДОКУМЕНТЫ И ПРАВИЛА ==="),
+        (["документы", "правила", "положение", "устав", "регламент", "инструкция", "бланк", "заявление"], "=== ДОКУМЕНТЫ И ПРАВИЛА ==="),
         (["новые поступления", "новинки", "поступило", "свежие"], "=== НОВЫЕ ПОСТУПЛЕНИЯ ==="),
     ]
-    
-    for keywords, section in keyword_groups:
-        if any(kw in query_lower for kw in keywords):
-            if section.startswith("==="):
-                lines = KNOWLEDGE_BASE.split('\n')
-                in_section, result = False, []
-                for line in lines:
-                    if section in line:
-                        in_section = True
-                        result.append(line)
-                    elif in_section:
-                        if line.startswith("==="): break
-                        if line.strip(): result.append(line)
-                return clean_text('\n'.join(result))
-            else:
-                return clean_text(section)
+
+    best_match = None
+    best_score = 0.0
+
+    for keywords, section in sections_map:
+        # Проверяем, есть ли точное вхождение хотя бы одного ключевого слова
+        if any(kw in norm_query for kw in keywords):
+            # Нашли точное совпадение – сразу берём
+            best_match = section
+            break
+        # Иначе вычисляем максимальную схожесть с каждым ключевым словом
+        for kw in keywords:
+            score = jaccard_similarity(norm_query, kw)
+            if score > best_score:
+                best_score = score
+                best_match = section
+
+    if best_match and best_score >= 0.3:  # порог срабатывания нечёткого поиска
+        if best_match.startswith("==="):
+            lines = KNOWLEDGE_BASE.split('\n')
+            in_section, result = False, []
+            for line in lines:
+                if best_match in line:
+                    in_section = True
+                    result.append(line)
+                elif in_section:
+                    if line.startswith("==="): break
+                    if line.strip(): result.append(line)
+            return clean_text('\n'.join(result))
+        else:
+            return clean_text(best_match)
+
     return None
 
-# === Генерация финального ответа ===
+# === Генерация ответа через ИИ ===
 def generate_ai_response(query: str, context: str, source: str = "локальной базы") -> str:
     prompt = f"""
-Ты — строгий и полезный виртуальный библиотекарь. Твоя задача — дать точный ответ, основанный ИСКЛЮЧИТЕЛЬНО на предоставленной информации. Не добавляй ничего от себя. Если в информации нет ответа, честно скажи об этом и предложи обратиться к сотруднику.
+Ты — заботливый и вежливый виртуальный библиотекарь Фундаментальной учебной библиотеки Сеченовского Университета.
+Твоя задача — дать чёткий и полезный ответ, основанный ТОЛЬКО на предоставленном контексте.
+Не выдумывай факты, не добавляй лишней информации.
+Если в контексте есть ссылки, оформляй их в формате Markdown: [название](ссылка).
+Старайся отвечать дружелюбно, можно использовать эмодзи, но не перебарщивай.
 
-**Правила для ссылок:**
-- Оформляй их в формате Markdown: [Название документа](ссылка).
+Источник: {source}
+Контекст:
+{context}
 
-**Источник информации:** {source}
-**Контекст:** {context}
-**Вопрос:** {query}
+Вопрос пользователя: {query}
 
-**Твой ответ:**
+Твой ответ:
 """
     return generate_with_groq(prompt, max_tokens=600)
 
@@ -197,14 +209,14 @@ def generate_ai_response(query: str, context: str, source: str = "локальн
 async def welcome():
     return {
         "response": (
-            "👋 Здравствуйте! Я — виртуальный помощник Фундаментальной учебной библиотеки Сеченовского Университета.\n\n"
-            "Я помогу вам узнать:\n"
-            "• режим работы и адрес;\n"
-            "• как записаться и получить учебники;\n"
-            "• контакты, руководство, правила;\n"
-            "• наличие популярных учебников и электронных ресурсов.\n\n"
-            "Просто напишите свой вопрос, и я постараюсь найти ответ. "
-            "Если я что-то упущу — всегда можно обратиться к сотруднику по телефону +7(499) 246‑05‑97."
+            "👋 Добро пожаловать в Фундаментальную учебную библиотеку Сеченовского Университета!\n\n"
+            "Я — ваш виртуальный помощник. Я могу:\n"
+            "• подсказать режим работы и адрес;\n"
+            "• объяснить, как записаться и получить учебники;\n"
+            "• рассказать о контактах, руководстве и правилах;\n"
+            "• помочь найти популярные учебники и электронные ресурсы.\n\n"
+            "Просто напишите свой вопрос, и я постараюсь быстро найти ответ. "
+            "Если потребуется помощь сотрудника — звоните +7(499) 246-05-97."
         )
     }
 
@@ -216,26 +228,28 @@ async def options_chat():
 async def chat(request: Request):
     data = await request.json()
     user_message = data.get("message", "").strip()
-    
-    # Если сообщение пустое — можно вернуть короткое приветствие
+
     if not user_message:
         return {"response": (
             "👋 Здравствуйте! Я — виртуальный библиотекарь. "
-            "Спросите меня о режиме работы, адресе, записи, учебниках или контактах — я постараюсь помочь!"
+            "Спросите меня о режиме работы, адресе, записи, учебниках или контактах — я с радостью помогу!"
         )}
-    
+
     # 1. Локальный поиск
     local_result = search_in_knowledge_base(user_message)
     if local_result:
         return {"response": generate_ai_response(user_message, local_result, "локальной базы знаний")}
-    
+
     # 2. Поиск по сайту
     web_result = search_on_website(user_message)
     if web_result:
-        return {"response": generate_ai_response(user_message, web_result, "поиска по сайту")}
-    
-    # 3. Не найдено
-    return {"response": "К сожалению, я не нашел ответ на ваш вопрос. Рекомендую обратиться к сотруднику библиотеки лично или по телефону +7(499) 246-05-97."}
+        return {"response": generate_ai_response(user_message, web_result, "поиска по сайту библиотеки")}
+
+    # 3. Ничего не найдено
+    return {"response": (
+        "😔 К сожалению, я не смог найти ответ на ваш вопрос. "
+        "Пожалуйста, обратитесь к сотруднику библиотеки лично или по телефону +7(499) 246-05-97."
+    )}
 
 @app.get("/health")
 async def health():
