@@ -1,6 +1,6 @@
 """
-AI Библиотекарь — Версия для демонстрации
-Короткое приветствие и развёрнутые ответы по книгам.
+AI Библиотекарь – Сеченовский Университет
+Подробные ответы + мультиязычность + перевод истории
 """
 
 import os
@@ -15,10 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
-if not GROQ_API_KEY:
-    GROQ_API_KEY = "dummy"
-if not SERPER_API_KEY:
-    SERPER_API_KEY = "dummy"
+if not GROQ_API_KEY or not SERPER_API_KEY:
+    raise ValueError("❌ Укажи GROQ_API_KEY и SERPER_API_KEY в переменных окружения")
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL_NAME = "llama-3.3-70b-versatile"
@@ -27,205 +25,172 @@ SERPER_URL = "https://google.serper.dev/search"
 with open("knowledge_base.txt", "r", encoding="utf-8") as f:
     KNOWLEDGE_BASE = f.read()
 
-app = FastAPI(title="Library AI Bot")
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+                   allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# === Языки ===
+LANGS = {"ru": "русский", "en": "английский", "zh": "китайский"}
 
-# === Получение секции по заголовку ===
-def get_section(section_header: str) -> str:
-    lines = KNOWLEDGE_BASE.split('\n')
-    in_section = False
-    result = []
-    for line in lines:
-        if section_header in line:
-            in_section = True
-            result.append(line)
-        elif in_section:
-            if line.startswith("==="):
-                break
-            if line.strip():
-                result.append(line)
-    return '\n'.join(result)
-
-# === Очистка текста ===
+# === Утилиты ===
 def clean_text(text: str) -> str:
-    if not text:
-        return ""
+    if not text: return ""
     text = html.unescape(text)
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-# === Генерация через Groq (или fallback) ===
-def generate_with_groq(prompt: str, max_tokens: int = 600) -> str:
-    if GROQ_API_KEY == "dummy":
-        return "⚠️ API ключ не настроен. Информация:\n" + prompt.split("Контекст:")[-1].strip()
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
-        "max_tokens": max_tokens
-    }
+def generate_with_groq(prompt: str, max_tokens: int = 700) -> str:
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    payload = {"model": MODEL_NAME, "messages": [{"role": "user", "content": prompt}],
+               "temperature": 0.2, "max_tokens": max_tokens}
     try:
-        response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-        return clean_text(response.json()["choices"][0]["message"]["content"].strip())
+        r = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
+        return clean_text(r.json()["choices"][0]["message"]["content"].strip())
     except Exception as e:
-        print(f"Ошибка Groq: {e}")
-        return "Извините, ошибка. Вот что удалось найти:\n" + prompt.split("Контекст:")[-1].strip()
+        print(f"Groq error: {e}")
+        return "⚠️ Ошибка. Попробуйте позже или позвоните +7(499) 246-05-97."
 
-# === Поиск по сайту (запасной) ===
-def search_on_website(query: str) -> Optional[str]:
-    if SERPER_API_KEY == "dummy":
-        return None
-    headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
-    payload = {"q": f"site:edu.rucml.ru {query}", "gl": "ru", "hl": "ru", "num": 3}
-    try:
-        response = requests.post(SERPER_URL, headers=headers, json=payload, timeout=10)
-        data = response.json()
-        snippets = []
-        for item in data.get("organic", []):
-            snippet = clean_text(item.get("snippet", ""))
-            if snippet:
-                snippets.append(snippet)
-        return "\n".join(snippets[:2]) if snippets else None
-    except:
-        return None
+# === Получение раздела из базы ===
+def get_section(header: str) -> str:
+    lines = KNOWLEDGE_BASE.split('\n')
+    inside = False
+    result = []
+    for line in lines:
+        if header in line:
+            inside = True
+            result.append(line)
+        elif inside:
+            if line.startswith("==="): break
+            if line.strip(): result.append(line)
+    return '\n'.join(result)
 
-# === Поиск ответа с составными секциями ===
-def find_answer(query: str) -> Optional[str]:
+# === Умный поиск (ключевые слова) ===
+def find_context(query: str) -> Optional[str]:
     q = query.lower()
-    
-    # === ПОЛУЧЕНИЕ КНИГ (составной ответ) ===
-    book_get_keywords = ["получить", "взять", "заказать", "выдача", "как получить книги", "как взять учебник", "заказ книг", "получение литературы"]
-    if any(kw in q for kw in book_get_keywords):
-        sections = []
-        # Кампусная карта
-        card = get_section("=== КАМПУСНАЯ КАРТА ===")
-        if card:
-            sections.append("📇 КАМПУСНАЯ КАРТА (читательский билет):\n" + card)
-        # Личный кабинет
-        lk = get_section("=== ЛИЧНЫЙ КАБИНЕТ ===")
-        if lk:
-            sections.append("💻 ЛИЧНЫЙ КАБИНЕТ:\n" + lk)
-        # Как получить учебники
-        howto = get_section("=== КАК ПОЛУЧИТЬ УЧЕБНИКИ ===")
-        if howto:
-            sections.append("📚 ПОШАГОВАЯ ИНСТРУКЦИЯ:\n" + howto)
-        if sections:
-            return "\n\n".join(sections)
-    
-    # === ВРЕМЯ РАБОТЫ ===
-    work_keywords = ["время", "работ", "режим", "час", "график", "открыт", "закрыт", "расписание"]
-    if any(kw in q for kw in work_keywords):
-        section = get_section("=== РЕЖИМ РАБОТЫ ===")
-        if section:
-            return section
+    # Режим работы
+    if any(w in q for w in ["время", "работ", "режим", "час", "график", "открыт", "закрыт"]):
+        return get_section("=== РЕЖИМ РАБОТЫ ===")
+    # Адрес
+    if any(w in q for w in ["адрес", "находится", "метро", "зубовский", "парк культуры"]):
+        return get_section("=== АДРЕС ===")
+    # Контакты
+    if any(w in q for w in ["телефон", "почта", "email", "контакт"]):
+        return get_section("=== КОНТАКТЫ ===")
+    # Запись
+    if any(w in q for w in ["записаться", "запись", "стать читателем"]):
+        return get_section("=== ЗАПИСЬ В БИБЛИОТЕКУ ===")
+    # Кампусная карта
+    if any(w in q for w in ["кампусная", "карта", "читательский билет"]):
+        return get_section("=== КАМПУСНАЯ КАРТА ===")
+    # Получение учебников
+    if any(w in q for w in ["получить", "взять", "заказать", "выдача", "книг", "учебник"]):
+        return get_section("=== КАК ПОЛУЧИТЬ УЧЕБНИКИ ===")
+    # Долги
+    if any(w in q for w in ["долг", "просроч", "сдать", "потерял"]):
+        return get_section("=== ДОЛГИ И ЗАДОЛЖЕННОСТИ ===")
+    # Личный кабинет
+    if any(w in q for w in ["личный кабинет", "логин", "пароль"]):
+        return get_section("=== ЛИЧНЫЙ КАБИНЕТ ===")
+    # Учебники (популярные)
+    if any(w in q for w in ["учебник", "атлас", "анатомия", "гистология", "биохимия"]):
+        return get_section("=== ПОПУЛЯРНЫЕ УЧЕБНИКИ ===")
+    # Электронные ресурсы
+    if any(w in q for w in ["электрон", "znanium", "ивис", "подписк"]):
+        return get_section("=== ДОСТУПНЫЕ ЭЛЕКТРОННЫЕ РЕСУРСЫ ===")
+    return None
 
-    # === АДРЕС ===
-    addr_keywords = ["адрес", "находится", "проехать", "метро", "зубовский", "парк культуры"]
-    if any(kw in q for kw in addr_keywords):
-        section = get_section("=== АДРЕС ===")
-        if section:
-            return section
+# === Генерация подробного ответа с добавлением связанных разделов ===
+def build_detailed_response(query: str, main_context: str, lang: str) -> str:
+    # Определяем, нужно ли добавить связанную информацию
+    extra_context = ""
+    q = query.lower()
+    if any(w in q for w in ["получить", "взять", "заказать", "выдача", "книг", "учебник"]):
+        # Добавляем про кампусную карту и личный кабинет
+        extra_context += "\n\nДополнительная важная информация:\n"
+        extra_context += get_section("=== КАМПУСНАЯ КАРТА ===") + "\n"
+        extra_context += get_section("=== ЛИЧНЫЙ КАБИНЕТ ===")
+    elif any(w in q for w in ["записаться", "запись"]):
+        extra_context += "\n\nТакже понадобится:\n" + get_section("=== КАМПУСНАЯ КАРТА ===")
 
-    # === КОНТАКТЫ ===
-    contact_keywords = ["телефон", "почта", "email", "контакт", "позвонить"]
-    if any(kw in q for kw in contact_keywords):
-        section = get_section("=== КОНТАКТЫ ===")
-        if section:
-            return section
+    full_context = main_context + extra_context
 
-    # === РУКОВОДСТВО ===
-    chief_keywords = ["директор", "абрамова", "левин", "руководство"]
-    if any(kw in q for kw in chief_keywords):
-        section = get_section("=== РУКОВОДСТВО И АДМИНИСТРАЦИЯ ===")
-        if section:
-            return section
-
-    # === ЗАПИСЬ ===
-    reg_keywords = ["записаться", "запись", "стать читателем"]
-    if any(kw in q for kw in reg_keywords):
-        section = get_section("=== ЗАПИСЬ В БИБЛИОТЕКУ ===")
-        if section:
-            return section
-
-    # === КАМПУСНАЯ КАРТА (отдельно) ===
-    card_keywords = ["кампусная", "карта", "читательский билет"]
-    if any(kw in q for kw in card_keywords):
-        section = get_section("=== КАМПУСНАЯ КАРТА ===")
-        if section:
-            return section
-
-    # === УЧЕБНИКИ (список) ===
-    book_keywords = ["учебник", "книга", "атлас", "литература"]
-    if any(kw in q for kw in book_keywords):
-        section = get_section("=== ПОПУЛЯРНЫЕ УЧЕБНИКИ ===")
-        if section:
-            return section
-
-    # === ЭЛЕКТРОННЫЕ РЕСУРСЫ ===
-    eres_keywords = ["электрон", "znanium", "ивис", "эко-вектор", "подписка"]
-    if any(kw in q for kw in eres_keywords):
-        section = get_section("=== ДОСТУПНЫЕ ЭЛЕКТРОННЫЕ РЕСУРСЫ ===")
-        if section:
-            return section
-
-    # === ДОЛГИ ===
-    debt_keywords = ["долг", "задолженность", "сдать", "просроч"]
-    if any(kw in q for kw in debt_keywords):
-        section = get_section("=== ДОЛГИ И ЗАДОЛЖЕННОСТИ ===")
-        if section:
-            return section
-
-    # Если локально не нашли — ищем в интернете
-    return search_on_website(query)
-
-# === Генерация ответа через ИИ ===
-def generate_response(query: str, context: str) -> str:
+    lang_instr = {
+        "ru": "Отвечай на русском, подробно, но по делу.",
+        "en": "Answer in English. Translate context naturally.",
+        "zh": "用中文回答，详细但简洁。"
+    }
     prompt = f"""
-Ты — дружелюбный и полезный библиотекарь. Ответь на вопрос пользователя, используя ТОЛЬКО информацию ниже.
-Если контекст содержит несколько блоков (например, про кампусную карту, личный кабинет и получение книг), объясни последовательность действий.
-Не добавляй лишнего.
+Ты – сотрудник библиотеки Сеченовского университета. Используй ТОЛЬКО информацию ниже.
+Дай развёрнутый ответ, перечисли шаги, укажи телефоны и ссылки если есть.
+{lang_instr.get(lang, lang_instr["ru"])}
 
 Контекст:
-{context}
+{full_context}
 
 Вопрос: {query}
-Ответ (на русском):
+
+Ответ:
 """
-    return generate_with_groq(prompt)
+    return generate_with_groq(prompt, max_tokens=800)
+
+# === Перевод текста (для истории) ===
+def translate_text(text: str, target_lang: str) -> str:
+    prompt = f"Переведи следующий текст на {LANGS[target_lang]} (только перевод, без комментариев):\n\n{text}"
+    return generate_with_groq(prompt, max_tokens=500)
 
 # === Эндпоинты ===
 @app.get("/welcome")
 async def welcome(lang: str = "ru"):
-    # Короткое приветствие
-    return {"response": "👋 Привет! Я чат-бот библиотеки Сеченовского Университета. Помогу с режимом работы, получением книг, адресом и контактами. Спрашивай!"}
+    welcomes = {
+        "ru": "👋 Привет! Я чат-бот библиотеки. Помогу с навигацией.",
+        "en": "👋 Hi! I'm the library chatbot. I'll help you navigate.",
+        "zh": "👋 你好！我是图书馆聊天机器人。我会帮你导航。"
+    }
+    return {"response": welcomes.get(lang, welcomes["ru"])}
 
 @app.post("/chat")
 async def chat(request: Request):
     data = await request.json()
-    user_message = data.get("message", "").strip()
-    if not user_message:
-        return {"response": "👋 Задайте вопрос о библиотеке."}
+    message = data.get("message", "").strip()
+    lang = data.get("lang", "ru")
+    if lang not in LANGS: lang = "ru"
 
-    context = find_answer(user_message)
+    if not message:
+        return {"response": "Пожалуйста, задайте вопрос."}
+
+    context = find_context(message)
     if not context:
-        return {"response": "😔 Не нашёл ответ. Позвоните +7(499) 246-05-97."}
+        # Попробуем поискать через Serper
+        try:
+            headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
+            payload = {"q": f"site:edu.rucml.ru {message}", "gl": "ru", "hl": "ru", "num": 3}
+            r = requests.post(SERPER_URL, headers=headers, json=payload, timeout=8)
+            snippets = [clean_text(item.get("snippet","")) for item in r.json().get("organic",[]) if item.get("snippet")]
+            context = "\n".join(snippets[:2]) if snippets else None
+        except:
+            context = None
 
-    response = generate_response(user_message, context)
+    if not context:
+        return {"response": "😔 Не нашёл ответ. Обратитесь к сотруднику: +7(499) 246-05-97."}
+
+    response = build_detailed_response(message, context, lang)
     return {"response": response}
+
+@app.post("/translate")
+async def translate(request: Request):
+    data = await request.json()
+    text = data.get("text", "")
+    target_lang = data.get("lang", "en")
+    if not text:
+        return {"translated": ""}
+    translated = translate_text(text, target_lang)
+    return {"translated": translated}
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
